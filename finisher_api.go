@@ -768,3 +768,37 @@ func (db *DB) Exec(sql string, values ...interface{}) (tx *DB) {
 
 	return tx.callbacks.Raw().Execute(tx)
 }
+
+func (db *DB) SaveCheck0Primary(value interface{}) (tx *DB) {
+	tx = db.getInstance()
+	tx.Statement.Dest = value
+
+	reflectValue := reflect.Indirect(reflect.ValueOf(value))
+	for reflectValue.Kind() == reflect.Ptr || reflectValue.Kind() == reflect.Interface {
+		reflectValue = reflect.Indirect(reflectValue)
+	}
+
+	switch reflectValue.Kind() {
+	case reflect.Slice, reflect.Array:
+		if _, ok := tx.Statement.Clauses["ON CONFLICT"]; !ok {
+			tx = tx.Clauses(clause.OnConflict{UpdateAll: true})
+		}
+		tx = tx.callbacks.Create().Execute(tx.Set("gorm:update_track_time", true))
+	default:
+		selectedUpdate := len(tx.Statement.Selects) != 0
+		// when updating, use all fields including those zero-value fields
+		if !selectedUpdate {
+			tx.Statement.Selects = append(tx.Statement.Selects, "*")
+		}
+
+		updateTx := tx.callbacks.Update().Execute(tx.Session(&Session{Initialized: true}))
+
+		if updateTx.Error == nil && updateTx.RowsAffected == 0 && !updateTx.DryRun && !selectedUpdate {
+			return tx.Session(&Session{SkipHooks: true}).Clauses(clause.OnConflict{UpdateAll: true}).Create(value)
+		}
+
+		return updateTx
+	}
+
+	return
+}
